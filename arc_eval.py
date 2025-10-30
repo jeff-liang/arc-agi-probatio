@@ -1,5 +1,5 @@
 
-import os, json, glob, base64, argparse, asyncio, random, re, math, statistics
+import os, json, glob, base64, argparse, asyncio, random, re, math, statistics, copy
 from io import BytesIO
 from typing import List, Tuple, Any, Dict, Optional
 from pathlib import Path
@@ -360,8 +360,49 @@ async def eval_task_once(idx:int, total:int, sem:asyncio.Semaphore, client:httpx
     async with sem:
         k=len(golds)
         try:
-            reply = await call_openrouter_async(client, build_payload(model, messages, 0.0),
-                                                api_key, timeout_s, retries, backoff_base)
+            analysis_messages = copy.deepcopy(messages)
+            analysis_messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Before providing final answers, analyze each question's transformation. "
+                        "Respond with JSON of the form {\"analysis\": [...]}. "
+                        "Do not output any grids yet."
+                    )
+                }]
+            })
+            analysis_reply = await call_openrouter_async(
+                client,
+                build_payload(model, analysis_messages, 1.0),
+                api_key,
+                timeout_s,
+                retries,
+                backoff_base,
+            )
+
+            final_messages = copy.deepcopy(messages)
+            final_messages.append({"role": "assistant", "content": analysis_reply})
+            final_messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Using the analysis above, now produce the final answers. "
+                        "Return JSON ONLY with keys 'first_try' and 'second_try', each a list of K grids, "
+                        "formatted exactly as previously specified."
+                    )
+                }]
+            })
+
+            reply = await call_openrouter_async(
+                client,
+                build_payload(model, final_messages, 0.0),
+                api_key,
+                timeout_s,
+                retries,
+                backoff_base,
+            )
             ops_first=[]; ops_second=[]
             if strategy=="grid":
                 first, second = parse_multiple_grids(reply, k)
@@ -397,7 +438,8 @@ async def eval_task_once(idx:int, total:int, sem:asyncio.Semaphore, client:httpx
                 "pred_first": first,
                 "pred_second": second,
                 "golds": golds,
-                "raw": reply
+                "raw": reply,
+                "analysis": analysis_reply
             }
         except Exception as e:
             return {"idx": idx, "strategy": strategy, "error": str(e), "score_exact": 0.0, "score_pcell": 0.0, "golds": golds}
