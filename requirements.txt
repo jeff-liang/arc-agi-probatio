@@ -1,0 +1,4 @@
+# Minimal deps for ARC interface evaluator
+numpy>=1.23
+httpx[http2]>=0.27
+Pillow>=10.0.0

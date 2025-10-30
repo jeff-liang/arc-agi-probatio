@@ -1,0 +1,114 @@
+name: ARC Interface Eval
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset_dir:
+        description: "Path to ARC dataset folder inside the repo (contains *.json)"
+        required: true
+        default: "arc-data"
+      model:
+        description: "OpenRouter model id"
+        required: true
+        default: "openai/gpt-4o-mini"
+      strategy:
+        description: "Answer interface to evaluate"
+        required: true
+        default: "both"
+        type: choice
+        options: ["grid", "dsl", "both"]
+      mode:
+        description: "Prompt modality"
+        required: true
+        default: "multimodal"
+        type: choice
+        options: ["multimodal", "text"]
+      limit:
+        description: "Max number of tasks to evaluate (leave empty for all)"
+        required: false
+        default: "100"
+      concurrency:
+        description: "Concurrent API calls"
+        required: false
+        default: "8"
+      timeout:
+        description: "HTTP timeout (seconds)"
+        required: false
+        default: "120"
+      retries:
+        description: "HTTP retries"
+        required: false
+        default: "3"
+      backoff:
+        description: "Exponential backoff base"
+        required: false
+        default: "1.6"
+      out:
+        description: "Optional custom output path (e.g., results.jsonl)"
+        required: false
+        default: ""
+
+jobs:
+  arc-eval:
+    runs-on: ubuntu-latest
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify dataset presence
+        run: |
+          if [ ! -d "${{ github.workspace }}/${{ inputs.dataset_dir }}" ]; then
+            echo "Dataset directory not found: ${{ inputs.dataset_dir }}"
+            echo "Please add ARC JSON files to this folder in your repo."
+            exit 1
+          fi
+          ls -l "${{ github.workspace }}/${{ inputs.dataset_dir }}" | head -n 50
+
+      - name: Run evaluator
+        id: run_eval
+        run: |
+          set -euxo pipefail
+          # Coerce optional integers/floats safely
+          LIMIT_ARG=""
+          if [ -n "${{ inputs.limit }}" ]; then
+            LIMIT_ARG="--limit ${{ inputs.limit }}"
+          fi
+          OUT_ARG=""
+          if [ -n "${{ inputs.out }}" ]; then
+            OUT_ARG="--out '${{ inputs.out }}'"
+          fi
+          python arc_eval.py             --dataset_dir "${{ inputs.dataset_dir }}"             --model "${{ inputs.model }}"             --mode "${{ inputs.mode }}"             --strategy "${{ inputs.strategy }}"             --concurrency "${{ inputs.concurrency }}"             --timeout "${{ inputs.timeout }}"             --retries "${{ inputs.retries }}"             --backoff "${{ inputs.backoff }}"             $LIMIT_ARG $OUT_ARG | tee eval.log
+
+      - name: Upload results (JSONL + logs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: arc-eval-results
+          path: |
+            *.jsonl
+            eval.log
+          if-no-files-found: warn
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## ARC Interface Eval" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Model**: \`${{ inputs.model }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Strategy**: \`${{ inputs.strategy }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Mode**: \`${{ inputs.mode }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dataset**: \`${{ inputs.dataset_dir }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Tail of \`eval.log\`:" >> $GITHUB_STEP_SUMMARY
+          tail -n 50 eval.log >> $GITHUB_STEP_SUMMARY
