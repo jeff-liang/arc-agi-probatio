@@ -311,7 +311,7 @@ def build_messages_for_task_dsl(task:Dict[str,Any], mode:str)->Tuple[List[Dict],
     )
     system=(
         "You are solving ARC tasks. Infer the transformation from examples. For each QUESTION, "
-        "construct the output grid by specifying its size and a sequence of rectangle fills and single-cell edits. "
+        "construct the output grid by specifying its size and a short but correct sequence of rectangle fills and single-cell edits. "
         "Do not assume the output size; choose it explicitly in the program. You get two tries per question."
     )
     user_parts=[{"type":"text","text":"Examples:"}]
