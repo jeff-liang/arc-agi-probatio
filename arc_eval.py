@@ -137,6 +137,10 @@ def parse_multiple_grids(text:str, expected_k:int)->Tuple[List[List[List[int]]],
     second_k=coerce_to_k_grids(second)
     if not second_k:
         second_k=["" for _ in range(expected_k)]
+    if first_k[0] == "":
+        print("First grid empty")
+    if second_k[0] == "":
+        print("Second grid empty")
     return first_k, second_k
 
 # ---------- DSL + executor ----------
@@ -170,6 +174,7 @@ def exec_program(prog:Dict[str,Any])->Optional[List[List[int]]]:
                         grid[r][c]=color
         return grid
     except Exception:
+        print("Exec program failed")
         return None
 
 def parse_and_exec_programs(raw_text:str, expected_k:int)->Tuple[List[Any], List[Any]]:
@@ -362,6 +367,10 @@ async def eval_task_once(idx:int, total:int, sem:asyncio.Semaphore, client:httpx
                 first, second = parse_multiple_grids(reply, k)
             elif strategy=="dsl":
                 first, second = parse_and_exec_programs(reply, k)
+                if first[0] == "":
+                    print("First program failed")
+                if second[0] == "":
+                    print("Second program failed")
                 # also extract op counts
                 ops_first, ops_second = extract_op_counts_from_raw(reply, k)
             else:
