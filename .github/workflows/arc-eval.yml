@@ -47,10 +47,6 @@ on:
         description: "Exponential backoff base"
         required: false
         default: "1.6"
-      out:
-        description: "Optional custom output path (e.g., results.jsonl)"
-        required: false
-        default: ""
 
 jobs:
   arc-eval:
