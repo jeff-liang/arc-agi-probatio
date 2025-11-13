@@ -23,6 +23,10 @@ on:
         default: "multimodal"
         type: choice
         options: ["multimodal", "text"]
+      temperature:
+        description: "Generation temperature"
+        required: false
+        default: "0"
       limit:
         description: "Max number of tasks to evaluate (leave empty for all)"
         required: false

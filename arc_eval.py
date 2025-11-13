@@ -356,11 +356,11 @@ async def call_openrouter_async(client:httpx.AsyncClient, payload:Dict[str,Any],
 async def eval_task_once(idx:int, total:int, sem:asyncio.Semaphore, client:httpx.AsyncClient,
                          model:str, messages:List[Dict], golds:List[List[List[int]]],
                          api_key:str, timeout_s:float, retries:int, backoff_base:float,
-                         strategy:str):
+                         strategy:str, temp: float):
     async with sem:
         k=len(golds)
         try:
-            reply = await call_openrouter_async(client, build_payload(model, messages, 0.0),
+            reply = await call_openrouter_async(client, build_payload(model, messages, temp),
                                                 api_key, timeout_s, retries, backoff_base)
             ops_first=[]; ops_second=[]
             if strategy=="grid":
@@ -420,11 +420,11 @@ async def eval_tasks(args):
         if args.strategy in ("grid","both"):
             for idx,(m,g) in enumerate(built_grid, start=1):
                 tasks.append(eval_task_once(idx, total, sem, client, args.model, m, g,
-                                            api_key, args.timeout, args.retries, args.backoff, "grid"))
+                                            api_key, args.timeout, args.retries, args.backoff, "grid", args.temperature))
         if args.strategy in ("dsl","both"):
             for idx,(m,g) in enumerate(built_dsl, start=1):
                 tasks.append(eval_task_once(idx, total, sem, client, args.model, m, g,
-                                            api_key, args.timeout, args.retries, args.backoff, "dsl"))
+                                            api_key, args.timeout, args.retries, args.backoff, "dsl", args.temperature))
         for coro in asyncio.as_completed(tasks):
             rec=await coro
             records.append(rec)
@@ -551,6 +551,7 @@ def main():
     parser.add_argument("--mode", choices=["multimodal","text"], default="multimodal")
     parser.add_argument("--strategy", choices=["grid","dsl","both"], default="both")
     parser.add_argument("--out", type=str, default=None, help="Path to write JSONL results")
+    parser.add_argument("--temperature", type=float, default=0.0)
     args=parser.parse_args()
     random.seed(42)
     asyncio.run(eval_tasks(args))
