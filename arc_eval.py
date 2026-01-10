@@ -263,7 +263,7 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
     user_parts.append({"type":"text","text":
         "Return JSON only with keys 'first_try' and 'second_try'. Each is a list of K grids. "
         "A grid is a 2D array of digits 0..9. Example for K=2:\\n"
-        "{\\n  \\\"first_try\\\": [ [[0,1],[1,0]], [[2]] ],\\n  \\\"second_try\\\": [ [[0,0],[0,0]], [[2]] ]\\n}\\n"
+        "{\"first_try\":[[[0,1],[1,0]],[[2]]],\"second_try\":[[[0,0],[0,0]],[[2]]]}"
     })
     messages=[{"role":"system","content":system},{"role":"user","content":user_parts}]
     return messages, golds
