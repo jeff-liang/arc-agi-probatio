@@ -330,7 +330,7 @@ def build_messages_for_task_dsl(task:Dict[str,Any], mode:str)->Tuple[List[Dict],
 
 # ---------- OpenRouter call ----------
 def build_payload(model:str, messages:List[Dict], temperature:float)->Dict[str,Any]:
-    return {"model":model,"messages":messages,"temperature":temperature, "reasoning": {"effort": "high"}}
+    return {"model":model,"messages":messages,"temperature":temperature, "reasoning": {"exclude": True, "effort": "high"}}
 
 async def call_openrouter_async(client:httpx.AsyncClient, payload:Dict[str,Any], api_key:str,
                                 timeout_s:float, retries:int, backoff_base:float)->str:
