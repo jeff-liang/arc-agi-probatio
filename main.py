@@ -185,8 +185,9 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
             user_parts.append({"type":"text","text":f"(Q{i} image)"})
             user_parts.append({"type":"image_url","image_url":{"url":url}})
     user_parts.append({"type":"text","text":
-        """Return JSON only, with keys "first_try" and "second_try", each a list of K grids. 
-        A grid is a 2D array of digits 0..9. Ensure that each row is of equal length! Example for K=2:\\n
+        """Return in the following format. Example for two question grids:\\n
+        <rationale>
+        ```json
         {
           "first_try":[
             [
@@ -207,11 +208,14 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
             ]
           ]
         }
-        Be super thorough. Only answer once it is clear to you that your solution is correct.
+        ```
+        Confidence: <number between 0-100 representing your confidence that for every grid, one of your two tries is correct>
+        
+        Be super thorough. Only answer once it is clear to you that your solution is correct or you've spent a very long time thinking.
         Make sure your grids accurately represent the pattern you've discovered!!!
         Write down your proposed output at the end of your thinking and double check it before outputting.
         If you find mistakes, write the whole thing again and repeat. Your output should just be copying
-        the final list from your thinking."""
+        the final grids from your thinking."""
     })
     messages=[{"role":"system","content":system},{"role":"user","content":user_parts}]
     return messages, golds
