@@ -76,13 +76,31 @@ def encode_image_to_base64(image_path):
         return f"data:image/jpeg;base64,{base64.b64encode(image_file.read()).decode('utf-8')}"
 
 def load_arc_tasks(dataset_dir:str, limit:Optional[int]=None)->List[Dict[str,Any]]:
-    paths=sorted(glob.glob(os.path.join(dataset_dir,"*.json")))
-    random.shuffle(paths)
+    dataset_path = Path(dataset_dir)
     tasks=[]
-    for p in paths[:limit] if limit else paths:
-        with open(p,"r") as f:
-            tasks.append(json.load(f))
-    return tasks
+    if dataset_path.is_file():
+        with open(dataset_path, "r") as f:
+            obj = json.load(f)
+        if not isinstance(obj, dict):
+            raise ValueError(f"Expected top-level object in dataset file: {dataset_dir}")
+        for task_id, task in obj.items():
+            tasks.append({
+                "task_id": task_id,
+                "path": str(dataset_path),
+                "task": task,
+            })
+    else:
+        paths=sorted(glob.glob(os.path.join(dataset_dir,"*.json")))
+        random.shuffle(paths)
+        for p in paths:
+            with open(p,"r") as f:
+                tasks.append({
+                    "task_id": Path(p).stem,
+                    "path": p,
+                    "task": json.load(f),
+                })
+    random.shuffle(tasks)
+    return tasks[:limit] if limit else tasks
 
 # ---------- Validation helpers ----------
 def is_grid(x)->bool:
@@ -121,7 +139,7 @@ def extract_json_block(text:str)->str:
     return text
 
 # ---------- Naive grid parser (baseline) ----------
-def parse_multiple_grids(text:str, expected_k:int)->Tuple[List[List[List[int]]], List[List[List[int]]]]:
+def parse_multiple_grids(text:str, expected_k:int, log_failures:bool=True)->Tuple[List[List[List[int]]], List[List[List[int]]]]:
     block=extract_json_block(text)
     try:
         obj=json.loads(block)
@@ -146,14 +164,14 @@ def parse_multiple_grids(text:str, expected_k:int)->Tuple[List[List[List[int]]],
     second_k=coerce_to_k_grids(second)
     if not second_k:
         second_k=["" for _ in range(expected_k)]
-    if first_k[0] == "":
+    if log_failures and first_k[0] == "":
         print("First grid empty")
-    if second_k[0] == "":
+    if log_failures and second_k[0] == "":
         print("Second grid empty")
     return first_k, second_k
 
 # ---------- Prompt builders ----------
-def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict], List[List[List[int]]]]:
+def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict], Optional[List[List[List[int]]]]]:
     train_pairs=task["train"]; test_pairs=task["test"]
     k=len(test_pairs); assert k>=1
     examples_text=[]; example_images=[]
@@ -163,8 +181,13 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
         if mode=="multimodal":
             example_images.append(pil_to_data_url(compose_lr_arrow(render_grid(inp),render_grid(out))))
     q_text_lines=["Questions:"]; q_images=[]; golds=[]
+    has_golds=True
     for i, ex in enumerate(test_pairs, start=1):
-        inp=ex["input"]; golds.append(ex["output"])
+        inp=ex["input"]
+        if "output" in ex:
+            golds.append(ex["output"])
+        else:
+            has_golds=False
         q_text_lines.append(f"Q{i}: {question_text(inp)}")
         if mode=="multimodal":
             q_images.append(pil_to_data_url(compose_lr_arrow(render_grid(inp),render_question_box(len(inp), len(inp[0])))))
@@ -219,7 +242,24 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
         the final grids from your thinking."""
     })
     messages=[{"role":"system","content":system},{"role":"user","content":user_parts}]
-    return messages, golds
+    return messages, golds if has_golds else None
+
+def normalize_submission_grid(grid:Any)->List[List[int]]:
+    return grid if is_grid(grid) else []
+
+def build_submission_dict(records:List[Dict[str,Any]])->Dict[str,Any]:
+    submission={}
+    for rec in sorted(records, key=lambda r: r["task_id"]):
+        first=rec["pred_first"]
+        second=rec["pred_second"]
+        submission[rec["task_id"]]=[
+            {
+                "attempt_1": normalize_submission_grid(first[i]),
+                "attempt_2": normalize_submission_grid(second[i]),
+            }
+            for i in range(rec["num_test"])
+        ]
+    return submission
 
 # ---------- OpenRouter call ----------
 def build_payload(model:str, messages:List[Dict], temperature:float)->Dict[str,Any]:
@@ -248,16 +288,28 @@ async def call_openrouter_async(client:httpx.AsyncClient, payload:Dict[str,Any],
 
 # ---------- Evaluation ----------
 async def eval_task_once(idx:int, total:int, sem:asyncio.Semaphore, client:httpx.AsyncClient,
-                         model:str, messages:List[Dict], golds:List[List[List[int]]],
+                         task_id:str, model:str, messages:List[Dict], golds:Optional[List[List[List[int]]]],
+                         num_test:int, quiet:bool,
                          api_key:str, timeout_s:float, retries:int, backoff_base:float,
                          strategy:str, temp: float):
     async with sem:
-        k=len(golds)
+        k=num_test
         try:
             reply = await call_openrouter_async(client, build_payload(model, messages, temp),
                                                 api_key, timeout_s, retries, backoff_base)
-            print(reply)
-            first, second = parse_multiple_grids(reply, k)
+            if not quiet:
+                print(reply)
+            first, second = parse_multiple_grids(reply, k, log_failures=not quiet)
+            base_record = {
+                "idx": idx,
+                "task_id": task_id,
+                "strategy": strategy,
+                "num_test": k,
+                "pred_first": first,
+                "pred_second": second,
+            }
+            if quiet:
+                return base_record
             per_pair_exact = []
             per_pair_pcell = []
             for i in range(k):
@@ -271,19 +323,27 @@ async def eval_task_once(idx:int, total:int, sem:asyncio.Semaphore, client:httpx
             score_exact = sum(per_pair_exact)/k
             score_pcell = sum(per_pair_pcell)/k
             return {
-                "idx": idx,
-                "strategy": strategy,
+                **base_record,
                 "score_exact": score_exact,
                 "score_pcell": score_pcell,
                 "per_pair_exact": per_pair_exact,
                 "per_pair_pcell": per_pair_pcell,
-                "pred_first": first,
-                "pred_second": second,
                 "golds": golds,
                 "raw": reply
             }
         except Exception as e:
-            return {"idx": idx, "strategy": strategy, "error": str(e), "score_exact": 0.0, "score_pcell": 0.0, "golds": golds}
+            error_record = {
+                "idx": idx,
+                "task_id": task_id,
+                "strategy": strategy,
+                "num_test": k,
+                "error": str(e),
+                "pred_first": ["" for _ in range(k)],
+                "pred_second": ["" for _ in range(k)],
+            }
+            if quiet:
+                return error_record
+            return {**error_record, "score_exact": 0.0, "score_pcell": 0.0, "golds": golds}
 
 async def eval_tasks(args):
     api_key=os.environ.get("OPENROUTER_API_KEY")
@@ -291,23 +351,41 @@ async def eval_tasks(args):
     raw_tasks=load_arc_tasks(args.dataset_dir, args.limit)
     built_grid=[]
     for t in raw_tasks:
-        m,g=build_messages_for_task_grid(t, args.mode); built_grid.append((m,g))
+        task_data=t["task"]
+        m,g=build_messages_for_task_grid(task_data, args.mode)
+        built_grid.append((t["task_id"], m, g, len(task_data["test"])))
+    if args.task_mode == "score":
+        missing_outputs=[task_id for task_id, _, golds, _ in built_grid if golds is None]
+        if missing_outputs:
+            raise RuntimeError(f"Scoring mode requires test outputs. Missing outputs for tasks: {', '.join(missing_outputs[:5])}")
     sem=asyncio.Semaphore(args.concurrency)
     records=[]
     async with httpx.AsyncClient(http2=True) as client:
         tasks=[]
         total = len(raw_tasks)
-        for idx,(m,g) in enumerate(built_grid, start=1):
-            tasks.append(eval_task_once(idx, total, sem, client, args.model, m, g,
-                                            api_key, args.timeout, args.retries, args.backoff, "grid", args.temperature))
+        for idx,(task_id, m, g, num_test) in enumerate(built_grid, start=1):
+            tasks.append(eval_task_once(
+                idx, total, sem, client, task_id, args.model, m, g, num_test,
+                args.task_mode == "submission", api_key, args.timeout, args.retries,
+                args.backoff, "grid", args.temperature
+            ))
 
         for coro in asyncio.as_completed(tasks):
             rec=await coro
             records.append(rec)
             if "error" in rec:
                 print(f"[{rec['idx']}/{total}] ({rec['strategy']}) ERROR: {rec['error']}")
-            else:
+            elif args.task_mode == "score":
                 print(f"[{rec['idx']}/{total}] ({rec['strategy']}) exact={rec['score_exact']:.3f}  pcell={rec['score_pcell']:.3f}")
+            else:
+                print(f"[{rec['idx']}/{total}] ({rec['strategy']}) completed task_id={rec['task_id']}")
+
+    if args.task_mode == "submission":
+        out_path = Path(args.out or "submission.json")
+        with open(out_path, "w") as f:
+            json.dump(build_submission_dict(records), f)
+        print(f"\nWrote submission file to {out_path}")
+        return
 
     def summarize(strategy_name:str):
         subset=[r for r in records if r.get("strategy")==strategy_name and "error" not in r]
@@ -331,6 +409,7 @@ def main():
     parser=argparse.ArgumentParser(description="ARC eval")
     parser.add_argument("--dataset_dir", type=str, required=True)
     parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--task_mode", choices=["score","submission"], default="score")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=120.0)
