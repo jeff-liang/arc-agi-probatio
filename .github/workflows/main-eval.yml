@@ -1,0 +1,47 @@
+name: Run Main Eval
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-main:
+    runs-on: ubuntu-latest
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify dataset presence
+        run: |
+          if [ ! -d "arc-data/v2" ]; then
+            echo "Dataset directory not found: arc-data/v2"
+            exit 1
+          fi
+
+      - name: Run main.py
+        run: |
+          python main.py \
+            --dataset_dir arc-data/v2 \
+            --model openai/gpt-5.4-pro \
+            --concurrency 16 \
+            --timeout 24000
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-eval-results
+          path: |
+            arc_interface_results.jsonl
+          if-no-files-found: warn
