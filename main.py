@@ -39,8 +39,8 @@ def render_grid(grid:List[List[int]], palette:Dict[int,tuple]=DEFAULT_PALETTE)->
     d.rectangle([0,0,img.width-1,img.height-1], outline=(200,200,200))
     return img
 
-def render_question_box()->Image.Image:
-    QUESTION_W=12*CELL; QUESTION_H=12*CELL
+def render_question_box(h: int, w: int)->Image.Image:
+    QUESTION_W=w*CELL; QUESTION_H=h*CELL
     img=Image.new("RGB",(QUESTION_W,QUESTION_H),(255,255,255))
     d=ImageDraw.Draw(img)
     d.rectangle([0,0,img.width-1,img.height-1],outline=(180,180,180))
@@ -167,7 +167,7 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
         inp=ex["input"]; golds.append(ex["output"])
         q_text_lines.append(f"Q{i}: {question_text(inp)}")
         if mode=="multimodal":
-            q_images.append(pil_to_data_url(compose_lr_arrow(render_grid(inp),render_question_box())))
+            q_images.append(pil_to_data_url(compose_lr_arrow(render_grid(inp),render_question_box(len(inp), len(inp[0])))))
     system=(
         "You are solving ARC tasks. Each example shows an input grid and its correct output grid. "
         "Grids use digits 0-9 for colors. Infer the transformation and apply it to each question. "
@@ -187,6 +187,8 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
     user_parts.append({"type":"text","text":
         """Return in the following format. Example for two question grids:\\n
         <rationale>
+        Insert rationale here
+        </rationale>
         ```json
         {
           "first_try":[
@@ -209,9 +211,8 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
           ]
         }
         ```
-        Confidence: <number between 0-100 representing your confidence that for every grid, one of your two tries is correct>
         
-        Be super thorough. Only answer once it is clear to you that your solution is correct or you've spent a very long time thinking.
+        Be super thorough. You can do it!
         Make sure your grids accurately represent the pattern you've discovered!!!
         Write down your proposed output at the end of your thinking and double check it before outputting.
         If you find mistakes, write the whole thing again and repeat. Your output should just be copying
@@ -222,7 +223,7 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
 
 # ---------- OpenRouter call ----------
 def build_payload(model:str, messages:List[Dict], temperature:float)->Dict[str,Any]:
-    return {"model":model,"messages":messages,"temperature":temperature, "reasoning": {"exclude": True, "effort": "xhigh"}, "max_completion_tokens": 128000}
+    return {"model":model,"messages":messages,"temperature":temperature, "reasoning": {"exclude": True, "effort": "xhigh"}, "max_completion_tokens": 80000}
 
 async def call_openrouter_async(client:httpx.AsyncClient, payload:Dict[str,Any], api_key:str,
                                 timeout_s:float, retries:int, backoff_base:float)->str:
