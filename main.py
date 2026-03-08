@@ -191,7 +191,7 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
         if mode=="multimodal":
             q_images.append(pil_to_data_url(compose_lr_arrow(render_grid(inp),render_question_box(len(inp), len(inp[0])))))
     system=(
-        "You are solving ARC tasks. Each example shows an input grid and its correct output grid. "
+        "You are a puzzle solving expert solving ARC tasks. Each example shows an input grid and its correct output grid. "
         "Grids use digits 0-9 for colors. Infer the transformation and apply it to each question. "
         "Do not assume the output size; it can differ from the input. You get two tries for each grid."
     )
@@ -235,10 +235,7 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
         ```
         
         Be super thorough. You can do it!
-        Make sure your grids accurately represent the pattern you've discovered!!!
-        Write down your proposed output at the end of your thinking and double check it before outputting.
-        If you find mistakes, write the whole thing again and repeat. Your output should just be copying
-        the final grids from your thinking."""
+        Make sure your grids accurately represent the pattern you've discovered!"""
     })
     messages=[{"role":"system","content":system},{"role":"user","content":user_parts}]
     return messages, golds if has_golds else None
