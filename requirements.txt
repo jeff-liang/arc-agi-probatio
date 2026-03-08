@@ -1,4 +1,4 @@
 # Minimal deps for ARC interface evaluator
 numpy>=1.23
-httpx[http2]>=0.27
+openai>=1.68.0
 Pillow>=10.0.0
