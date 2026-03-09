@@ -311,7 +311,7 @@ async def call_openai_async(client:AsyncOpenAI, model:str, messages:List[Dict], 
                 model=normalize_model_name(model),
                 instructions=instructions,
                 input=openai_input,
-                temperature=temperature,
+                reasoning={"effort": "xhigh"},
                 stream=True,
                 timeout=timeout_s,
             )
