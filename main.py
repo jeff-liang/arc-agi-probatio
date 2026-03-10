@@ -90,7 +90,6 @@ def load_arc_tasks(dataset_dir:str, limit:Optional[int]=None)->List[Dict[str,Any
             })
     else:
         paths=sorted(glob.glob(os.path.join(dataset_dir,"*.json")))
-        random.shuffle(paths)
         for p in paths:
             with open(p,"r") as f:
                 tasks.append({
