@@ -34,7 +34,7 @@ jobs:
           python main.py \
             --dataset_dir arc-data/v2 \
             --model openai/gpt-5.4-pro \
-            --concurrency 8 \
+            --concurrency 11 \
             --timeout 24000
 
       - name: Upload results
