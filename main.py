@@ -1,11 +1,11 @@
 
-import os, json, glob, base64, argparse, asyncio, random, re, math, statistics, inspect
+import os, json, glob, base64, argparse, asyncio, random, re, math, statistics
 from io import BytesIO
 from typing import List, Tuple, Any, Dict, Optional
 from pathlib import Path
 
 import numpy as np
-from openai import AsyncOpenAI
+import httpx
 from PIL import Image, ImageDraw, ImageFont
 
 # ---------- Config ----------
@@ -14,6 +14,7 @@ DEFAULT_PALETTE = {
     5:(128,128,128),6:(255,0,255),7:(255,165,0),8:(0,128,128),9:(128,0,0)
 }
 CELL=24; GRID_PAD=6; ARROW_PAD=16; ARROW_WIDTH=28
+OPENROUTER_ENDPOINT="https://openrouter.ai/api/v1/chat/completions"
 
 # ---------- Utilities ----------
 def grid_to_text(grid:List[List[int]])->str:
@@ -242,40 +243,6 @@ def build_messages_for_task_grid(task:Dict[str,Any], mode:str)->Tuple[List[Dict]
 def normalize_submission_grid(grid:Any)->List[List[int]]:
     return grid if is_grid(grid) else []
 
-def normalize_model_name(model:str)->str:
-    if model.startswith("openai/"):
-        return model.split("/", 1)[1]
-    return model
-
-def messages_to_openai_input(messages:List[Dict])->Tuple[Optional[str], List[Dict[str,Any]]]:
-    instructions_parts=[]
-    openai_input=[]
-    for message in messages:
-        role=message["role"]
-        content=message["content"]
-        if role == "system":
-            if isinstance(content, str):
-                instructions_parts.append(content)
-            else:
-                instructions_parts.extend(part["text"] for part in content if part.get("type") == "text")
-            continue
-        content_parts=[]
-        if isinstance(content, str):
-            content_parts.append({"type": "input_text", "text": content})
-        else:
-            for part in content:
-                if part["type"] == "text":
-                    content_parts.append({"type": "input_text", "text": part["text"]})
-                elif part["type"] == "image_url":
-                    image_url=part["image_url"]
-                    image_part={"type": "input_image", "image_url": image_url["url"] if isinstance(image_url, dict) else image_url}
-                    if isinstance(image_url, dict) and "detail" in image_url:
-                        image_part["detail"]=image_url["detail"]
-                    content_parts.append(image_part)
-        openai_input.append({"role": role, "content": content_parts})
-    instructions="\n\n".join(instructions_parts) if instructions_parts else None
-    return instructions, openai_input
-
 def build_submission_dict(records:List[Dict[str,Any]])->Dict[str,Any]:
     submission={}
     for rec in sorted(records, key=lambda r: r["task_id"]):
@@ -290,65 +257,42 @@ def build_submission_dict(records:List[Dict[str,Any]])->Dict[str,Any]:
         ]
     return submission
 
-# ---------- OpenAI call ----------
-async def close_stream(stream:Any)->None:
-    close_fn=getattr(stream, "close", None)
-    if close_fn is None:
-        return
-    result=close_fn()
-    if inspect.isawaitable(result):
-        await result
+# ---------- OpenRouter call ----------
+def build_payload(model:str, messages:List[Dict], temperature:float)->Dict[str,Any]:
+    return {"model":model,"messages":messages,"temperature":temperature, "reasoning": {"exclude": True, "effort": "xhigh"}, "max_completion_tokens": 80000}
 
-async def call_openai_async(client:AsyncOpenAI, model:str, messages:List[Dict], temperature:float,
-                            timeout_s:float, retries:int, backoff_base:float)->str:
+async def call_openrouter_async(client:httpx.AsyncClient, payload:Dict[str,Any], api_key:str,
+                                timeout_s:float, retries:int, backoff_base:float)->str:
+    headers={
+        "Authorization":f"Bearer {api_key}",
+        "Content-Type":"application/json",
+        "HTTP-Referer":"https://local-eval",
+        "X-Title":"ARC-DSL Eval",
+    }
     attempt=0
     while True:
-        stream=None
         try:
-            instructions, openai_input = messages_to_openai_input(messages)
-            stream = await client.responses.create(
-                model=normalize_model_name(model),
-                instructions=instructions,
-                input=openai_input,
-                reasoning={"effort": "xhigh"},
-                stream=True,
-                timeout=timeout_s,
-            )
-            chunks=[]
-            final_response=None
-            async for event in stream:
-                if event.type == "response.output_text.delta":
-                    chunks.append(event.delta)
-                elif event.type == "response.completed":
-                    final_response = event.response
-                elif event.type == "response.failed":
-                    raise RuntimeError(f"OpenAI response failed: {event.response}")
-                elif event.type == "error":
-                    raise RuntimeError(f"OpenAI stream error: {event.error}")
-            if final_response is not None and getattr(final_response, "output_text", None):
-                return final_response.output_text
-            text="".join(chunks).strip()
-            if text:
-                return text
-            raise RuntimeError("OpenAI stream finished without output text.")
+            r=await client.post(OPENROUTER_ENDPOINT, headers=headers, json=payload, timeout=timeout_s)
+            data=r.json()
+            if "choices" not in data: raise ValueError(data)
+            if data['choices'][0]['message']['content'] is None: raise ValueError(data)
+            return data["choices"][0]["message"]["content"]
         except Exception as e:
             attempt+=1
             if attempt>retries: raise
             await asyncio.sleep((backoff_base**attempt)+random.uniform(0,0.25))
-        finally:
-            if stream is not None:
-                await close_stream(stream)
 
 # ---------- Evaluation ----------
-async def eval_task_once(idx:int, total:int, sem:asyncio.Semaphore, client:AsyncOpenAI,
+async def eval_task_once(idx:int, total:int, sem:asyncio.Semaphore, client:httpx.AsyncClient,
                          task_id:str, model:str, messages:List[Dict], golds:Optional[List[List[List[int]]]],
                          num_test:int, quiet:bool,
-                         timeout_s:float, retries:int, backoff_base:float,
+                         api_key:str, timeout_s:float, retries:int, backoff_base:float,
                          strategy:str, temp: float):
     async with sem:
         k=num_test
         try:
-            reply = await call_openai_async(client, model, messages, temp, timeout_s, retries, backoff_base)
+            reply = await call_openrouter_async(client, build_payload(model, messages, temp),
+                                                api_key, timeout_s, retries, backoff_base)
             if not quiet:
                 print(reply)
             first, second = parse_multiple_grids(reply, k, log_failures=not quiet)
@@ -398,8 +342,8 @@ async def eval_task_once(idx:int, total:int, sem:asyncio.Semaphore, client:Async
             return {**error_record, "score_exact": 0.0, "score_pcell": 0.0, "golds": golds}
 
 async def eval_tasks(args):
-    api_key=os.environ.get("OPENAI_API_KEY")
-    if not api_key: raise RuntimeError("Set OPENAI_API_KEY env var.")
+    api_key=os.environ.get("OPENROUTER_API_KEY")
+    if not api_key: raise RuntimeError("Set OPENROUTER_API_KEY env var.")
     raw_tasks=load_arc_tasks(args.dataset_dir, args.limit)
     built_grid=[]
     for t in raw_tasks:
@@ -412,14 +356,13 @@ async def eval_tasks(args):
             raise RuntimeError(f"Scoring mode requires test outputs. Missing outputs for tasks: {', '.join(missing_outputs[:5])}")
     sem=asyncio.Semaphore(args.concurrency)
     records=[]
-    client = AsyncOpenAI(api_key=api_key, max_retries=0, timeout=args.timeout)
-    try:
+    async with httpx.AsyncClient(http2=True) as client:
         tasks=[]
         total = len(raw_tasks)
         for idx,(task_id, m, g, num_test) in enumerate(built_grid, start=1):
             tasks.append(eval_task_once(
                 idx, total, sem, client, task_id, args.model, m, g, num_test,
-                args.task_mode == "submission", args.timeout, args.retries,
+                args.task_mode == "submission", api_key, args.timeout, args.retries,
                 args.backoff, "grid", args.temperature
             ))
 
@@ -432,8 +375,6 @@ async def eval_tasks(args):
                 print(f"[{rec['idx']}/{total}] ({rec['strategy']}) exact={rec['score_exact']:.3f}  pcell={rec['score_pcell']:.3f}")
             else:
                 print(f"[{rec['idx']}/{total}] ({rec['strategy']}) completed task_id={rec['task_id']}")
-    finally:
-        await client.close()
 
     if args.task_mode == "submission":
         out_path = Path(args.out or "submission.json")
