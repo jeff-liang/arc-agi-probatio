@@ -16,7 +16,7 @@ on:
         required: true
         default: "both"
         type: choice
-        options: ["grid", "dsl", "both"]
+        options: ["grid", "dsl", "code", "both", "all"]
       mode:
         description: "Prompt modality"
         required: true

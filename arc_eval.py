@@ -177,6 +177,32 @@ def exec_program(prog:Dict[str,Any])->Optional[List[List[int]]]:
         print("Exec program failed")
         return None
 
+def exec_code_program(code:str, input_grid:List[List[int]])->Optional[List[List[int]]]:
+    try:
+        ns:Dict[str,Any]={}
+        exec(compile(code,"<arc_transform>","exec"),{"__builtins__":__builtins__,"math":__import__("math"),"itertools":__import__("itertools"),"collections":__import__("collections")},ns)
+        transform=ns.get("transform")
+        if not callable(transform): return None
+        result=transform([row[:] for row in input_grid])
+        return result if is_grid(result) else None
+    except Exception:
+        return None
+
+def parse_and_exec_code(raw_text:str, test_inputs:List[List[List[int]]], expected_k:int)->Tuple[List[Any],List[Any]]:
+    block=extract_json_block(raw_text)
+    try:
+        obj=json.loads(block)
+        first_code=obj.get("first_try",""); second_code=obj.get("second_try","")
+    except Exception:
+        first_code=""; second_code=""
+    def run(code,inputs):
+        if not isinstance(code,str) or not code.strip(): return [""]*expected_k
+        out=[]
+        for inp in inputs[:expected_k]:
+            g=exec_code_program(code,inp); out.append(g if is_grid(g) else "")
+        return out+[""]*(expected_k-len(out))
+    return run(first_code,test_inputs), run(second_code,test_inputs)
+
 def parse_and_exec_programs(raw_text:str, expected_k:int)->Tuple[List[Any], List[Any]]:
     block=extract_json_block(raw_text)
     def to_grids(x):
@@ -328,6 +354,49 @@ def build_messages_for_task_dsl(task:Dict[str,Any], mode:str)->Tuple[List[Dict],
     messages=[{"role":"system","content":system},{"role":"user","content":user_parts}]
     return messages, golds
 
+def build_messages_for_task_code(task:Dict[str,Any], mode:str)->Tuple[List[Dict], List[List[List[int]]], List[List[List[int]]]]:
+    train_pairs=task["train"]; test_pairs=task["test"]
+    k=len(test_pairs); assert k>=1
+    examples_text=[]; example_images=[]
+    for ex in train_pairs:
+        inp=ex["input"]; out=ex["output"]
+        examples_text.append(example_text_pair(inp,out))
+        if mode=="multimodal":
+            example_images.append(pil_to_data_url(compose_lr_arrow(render_grid(inp),render_grid(out))))
+    q_text_lines=["Questions:"]; q_images=[]; golds=[]; test_inputs=[]
+    for i, ex in enumerate(test_pairs, start=1):
+        inp=ex["input"]; golds.append(ex["output"]); test_inputs.append(inp)
+        q_text_lines.append(f"Q{i}: {question_text(inp)}")
+        if mode=="multimodal":
+            q_images.append(pil_to_data_url(compose_lr_arrow(render_grid(inp),render_question_box())))
+    system=(
+        "You are solving ARC tasks. Each example shows an input grid and its correct output grid. "
+        "Grids use digits 0-9 for colors. Infer the transformation rule and write a Python function "
+        "`transform(grid)` that takes a 2D list of ints and returns the transformed 2D list of ints. "
+        "The same function must handle all test inputs. You get two tries."
+    )
+    code_spec=(
+        "Write a Python function `transform(grid: list[list[int]]) -> list[list[int]]` encoding the rule. "
+        "You may use standard Python; math, itertools, and collections are available. "
+        "Do not assume output size equals input size. "
+        "Return JSON ONLY with string values for keys 'first_try' and 'second_try'.\\n"
+        "Example: {\"first_try\": \"def transform(grid):\\n    return [row[::-1] for row in grid]\","
+        " \"second_try\": \"def transform(grid):\\n    return grid\"}"
+    )
+    user_parts=[{"type":"text","text":"Examples:"}]
+    for i,txt in enumerate(examples_text, start=1):
+        user_parts.append({"type":"text","text":f"(Example {i})\\n{txt}"})
+        if mode=="multimodal":
+            user_parts.append({"type":"image_url","image_url":{"url":example_images[i-1]}})
+    user_parts.append({"type":"text","text":"\\n"+"\\n".join(q_text_lines)})
+    if mode=="multimodal":
+        for i,url in enumerate(q_images, start=1):
+            user_parts.append({"type":"text","text":f"(Q{i} image)"})
+            user_parts.append({"type":"image_url","image_url":{"url":url}})
+    user_parts.append({"type":"text","text":"\\n"+code_spec})
+    messages=[{"role":"system","content":system},{"role":"user","content":user_parts}]
+    return messages, golds, test_inputs
+
 # ---------- OpenRouter call ----------
 def build_payload(model:str, messages:List[Dict], temperature:float)->Dict[str,Any]:
     return {"model":model,"messages":messages,"temperature":temperature, "reasoning": {"exclude": True, "effort": "high"}}
@@ -356,7 +425,7 @@ async def call_openrouter_async(client:httpx.AsyncClient, payload:Dict[str,Any],
 async def eval_task_once(idx:int, total:int, sem:asyncio.Semaphore, client:httpx.AsyncClient,
                          model:str, messages:List[Dict], golds:List[List[List[int]]],
                          api_key:str, timeout_s:float, retries:int, backoff_base:float,
-                         strategy:str, temp: float):
+                         strategy:str, temp: float, test_inputs:Optional[List[List[List[int]]]]=None):
     async with sem:
         k=len(golds)
         try:
@@ -373,6 +442,12 @@ async def eval_task_once(idx:int, total:int, sem:asyncio.Semaphore, client:httpx
                     print("Second program failed")
                 # also extract op counts
                 ops_first, ops_second = extract_op_counts_from_raw(reply, k)
+            elif strategy=="code":
+                first, second = parse_and_exec_code(reply, test_inputs or [], k)
+                if first[0] == "":
+                    print("First code failed")
+                if second[0] == "":
+                    print("Second code failed")
             else:
                 raise ValueError(f"Unknown strategy: {strategy}")
             per_pair_exact = []
@@ -406,25 +481,31 @@ async def eval_tasks(args):
     api_key=os.environ.get("OPENROUTER_API_KEY")
     if not api_key: raise RuntimeError("Set OPENROUTER_API_KEY env var.")
     raw_tasks=load_arc_tasks(args.dataset_dir, args.limit)
-    built_grid=[]; built_dsl=[]
+    built_grid=[]; built_dsl=[]; built_code=[]
     for t in raw_tasks:
-        if args.strategy in ("grid","both"):
+        if args.strategy in ("grid","both","all"):
             m,g=build_messages_for_task_grid(t, args.mode); built_grid.append((m,g))
-        if args.strategy in ("dsl","both"):
+        if args.strategy in ("dsl","both","all"):
             m,g=build_messages_for_task_dsl(t, args.mode); built_dsl.append((m,g))
+        if args.strategy in ("code","all"):
+            m,g,ti=build_messages_for_task_code(t, args.mode); built_code.append((m,g,ti))
     sem=asyncio.Semaphore(args.concurrency)
     records=[]
     async with httpx.AsyncClient(http2=True) as client:
         tasks=[]
         total = len(raw_tasks)
-        if args.strategy in ("grid","both"):
+        if args.strategy in ("grid","both","all"):
             for idx,(m,g) in enumerate(built_grid, start=1):
                 tasks.append(eval_task_once(idx, total, sem, client, args.model, m, g,
                                             api_key, args.timeout, args.retries, args.backoff, "grid", args.temperature))
-        if args.strategy in ("dsl","both"):
+        if args.strategy in ("dsl","both","all"):
             for idx,(m,g) in enumerate(built_dsl, start=1):
                 tasks.append(eval_task_once(idx, total, sem, client, args.model, m, g,
                                             api_key, args.timeout, args.retries, args.backoff, "dsl", args.temperature))
+        if args.strategy in ("code","all"):
+            for idx,(m,g,ti) in enumerate(built_code, start=1):
+                tasks.append(eval_task_once(idx, total, sem, client, args.model, m, g,
+                                            api_key, args.timeout, args.retries, args.backoff, "code", args.temperature, test_inputs=ti))
         for coro in asyncio.as_completed(tasks):
             rec=await coro
             records.append(rec)
@@ -448,11 +529,14 @@ async def eval_tasks(args):
         }
     sum_grid = summarize("grid")
     sum_dsl  = summarize("dsl")
+    sum_code = summarize("code")
     print("\\n====== SUMMARY ======")
     if sum_grid:
         print(f"GRID  - tasks={sum_grid['n_tasks']}  mean_exact={sum_grid['mean_exact']:.3f}  mean_pcell={sum_grid['mean_pcell']:.3f}")
     if sum_dsl:
         print(f"DSL   - tasks={sum_dsl['n_tasks']}   mean_exact={sum_dsl['mean_exact']:.3f}   mean_pcell={sum_dsl['mean_pcell']:.3f}")
+    if sum_code:
+        print(f"CODE  - tasks={sum_code['n_tasks']}  mean_exact={sum_code['mean_exact']:.3f}  mean_pcell={sum_code['mean_pcell']:.3f}")
     if sum_grid and sum_dsl:
         by_idx={ (r['idx'],r['strategy']): r for r in records if 'error' not in r}
         exact_diffs=[]; pcell_diffs=[]
@@ -549,7 +633,7 @@ def main():
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--backoff", type=float, default=1.6)
     parser.add_argument("--mode", choices=["multimodal","text"], default="multimodal")
-    parser.add_argument("--strategy", choices=["grid","dsl","both"], default="both")
+    parser.add_argument("--strategy", choices=["grid","dsl","code","both","all"], default="both")
     parser.add_argument("--out", type=str, default=None, help="Path to write JSONL results")
     parser.add_argument("--temperature", type=float, default=0.0)
     args=parser.parse_args()
